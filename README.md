@@ -12,10 +12,17 @@ on:
 jobs:
   driver:
     uses: junohouse/driver-ci/.github/workflows/driver.yml@v1
+    permissions:
+      contents: write
     secrets: inherit
 ```
 
 Push to `main` for a beta. Tag `v1.2.0` for a release. That is the whole interface.
+
+The `permissions` block is not optional. Publishing writes releases, a called workflow cannot
+request more permission than its caller was granted, and the default `GITHUB_TOKEN` is
+read-only — so leaving it out fails the run before any job starts, with an error naming this
+workflow rather than the caller that is actually missing a line.
 
 ## What you get
 
