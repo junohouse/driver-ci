@@ -1,0 +1,268 @@
+# The one workflow every certified driver calls.
+#
+# Doing the build here rather than in each driver repo is the point: "certified" means an
+# artifact came out of THIS workflow, so the validation step cannot be skipped by a driver
+# author in a hurry. A driver repo's own workflow is six lines and has no logic in it — which
+# is also why its Actions page is readable: one run, one job list, no matrix to decode.
+#
+# Two channels, decided by what triggered the run:
+#
+#   push to a v* tag  ->  stable   ->  GitHub release, indexed in index.json
+#   push to a branch  ->  beta     ->  rolling prerelease, indexed in beta.json
+#
+# A beta version is the manifest's version with a prerelease suffix (1.2.0-beta.41), which
+# sorts *below* 1.2.0 under semver. A controller on the stable channel therefore cannot be
+# offered a beta by accident even if the two indexes were merged by mistake.
+name: driver
+
+on:
+  workflow_call:
+    inputs:
+      packages:
+        description: >-
+          JSON array of package directories, each holding a manifest.toml. Defaults to the
+          repo root. A repo ships more than one when it has drivers that share no control
+          code — Caséta's telnet and LEAP paths, say.
+        type: string
+        default: '["."]'
+      core-ref:
+        description: Tag of junohouse/core to build and validate against.
+        type: string
+        default: v0.1.0
+      registry-repo:
+        type: string
+        default: junohouse/registry
+      mirror-repo:
+        description: Public repo that re-hosts artifacts so controllers never need a token.
+        type: string
+        default: Juno-Certified-Drivers/artifacts
+    secrets:
+      CORE_TOKEN:
+        description: Read access to junohouse/core, which is private.
+        required: true
+      REGISTRY_TOKEN:
+        description: Dispatch into the registry, and write releases on the mirror.
+        required: true
+
+# Two builds of the same commit must not race to publish the same tag.
+concurrency:
+  group: driver-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  # -------------------------------------------------------------------------------------
+  # One job per package per platform. A driver is a native dylib, so "build once" is not
+  # available to us: the controller runs on macOS in some houses and Linux in others, and a
+  # package that carries only one of them fails at install time on the other, which is the
+  # worst place to find out.
+  # -------------------------------------------------------------------------------------
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        package: ${{ fromJSON(inputs.packages) }}
+        target:
+          - { os: macos-14,      ext: dylib }
+          - { os: ubuntu-latest, ext: so }
+    runs-on: ${{ matrix.target.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      # An artifact name cannot contain a slash, and a package directory can. Slugged once
+      # here so the upload and the download in `publish` agree on the name.
+      - name: Name this package
+        run: echo "SLUG=$(echo '${{ matrix.package }}' | tr '/.' '--')" >> "$GITHUB_ENV"
+
+      # Cargo resolves the SDK from a private repo. Its built-in git client cannot use the
+      # token; the CLI can, so hand the fetch to it rather than embedding credentials in a
+      # URL where they end up in build logs.
+      - name: Let cargo fetch the private SDK
+        run: |
+          echo "CARGO_NET_GIT_FETCH_WITH_CLI=true" >> "$GITHUB_ENV"
+          git config --global url."https://x-access-token:${{ secrets.CORE_TOKEN }}@github.com/".insteadOf "https://github.com/"
+
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: ${{ matrix.package }}
+
+      - name: Build
+        working-directory: ${{ matrix.package }}
+        run: cargo build --release
+
+      # Renamed to the flat `driver.<ext>` the package format expects. The two platforms have
+      # different extensions, so both can sit in one archive without colliding and the
+      # controller picks the one it can actually load.
+      - name: Collect the library
+        working-directory: ${{ matrix.package }}
+        run: |
+          lib=$(find target/release -maxdepth 1 -name '*.${{ matrix.target.ext }}' -print -quit)
+          if [ -z "$lib" ]; then
+            echo "::error::cargo build produced no .${{ matrix.target.ext }} — is crate-type = [\"cdylib\"] set?"
+            exit 1
+          fi
+          cp "$lib" "$RUNNER_TEMP/driver.${{ matrix.target.ext }}"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: lib-${{ env.SLUG }}-${{ matrix.target.ext }}
+          path: ${{ runner.temp }}/driver.${{ matrix.target.ext }}
+          if-no-files-found: error
+
+  # -------------------------------------------------------------------------------------
+  # Validate, package, publish, and tell the registry. One job per package, after every
+  # platform for it has been built.
+  # -------------------------------------------------------------------------------------
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    strategy:
+      fail-fast: false
+      matrix:
+        package: ${{ fromJSON(inputs.packages) }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Name this package
+        run: echo "SLUG=$(echo '${{ matrix.package }}' | tr '/.' '--')" >> "$GITHUB_ENV"
+
+      - name: Work out the channel and the version
+        id: meta
+        run: |
+          declared=$(grep -m1 '^version' '${{ matrix.package }}/manifest.toml' | cut -d'"' -f2)
+          if [ -z "$declared" ]; then
+            echo "::error::${{ matrix.package }}/manifest.toml declares no version"
+            exit 1
+          fi
+
+          if [ "$GITHUB_REF_TYPE" = tag ]; then
+            # A tag names a version, so the manifest disagreeing with it is a mistake worth
+            # stopping for: the artifact is about to be published under the tag's name.
+            tagged="${GITHUB_REF_NAME#v}"
+            if [ "$declared" != "$tagged" ]; then
+              echo "::error::manifest.toml says $declared but the tag says $tagged"
+              exit 1
+            fi
+            echo "channel=stable"        >> "$GITHUB_OUTPUT"
+            echo "version=$declared"     >> "$GITHUB_OUTPUT"
+            echo "release=$GITHUB_REF_NAME" >> "$GITHUB_OUTPUT"
+          else
+            # Sorts below the release it is a preview of, so a stable controller can never
+            # resolve to it. run_number rather than the sha so betas order by recency.
+            echo "channel=beta" >> "$GITHUB_OUTPUT"
+            echo "version=$declared-beta.$GITHUB_RUN_NUMBER" >> "$GITHUB_OUTPUT"
+            echo "release=beta" >> "$GITHUB_OUTPUT"
+          fi
+
+      # Validation needs core's proxy contracts, and `junod` itself does the packaging and
+      # emits the registry entry. A driver is only valid against a specific set of contracts,
+      # so we check core out at the pinned ref rather than vendoring a copy that goes stale.
+      - uses: actions/checkout@v4
+        with:
+          repository: junohouse/core
+          ref: ${{ inputs.core-ref }}
+          path: .juno-core
+          token: ${{ secrets.CORE_TOKEN }}
+
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: .juno-core
+
+      - name: Build junod
+        run: cargo build --release -p junod --manifest-path .juno-core/Cargo.toml
+
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: lib-${{ env.SLUG }}-*
+          path: ${{ runner.temp }}/libs
+          merge-multiple: true
+
+      - name: Stage the payloads beside the manifest
+        run: cp ${{ runner.temp }}/libs/driver.* '${{ matrix.package }}/'
+
+      # `pack` validates the manifest against the proxy contracts and refuses to write an
+      # archive it would not install, so this is the certification step and the build step at
+      # once — there is no way to publish while skipping it.
+      - name: Validate and package
+        id: pack
+        run: |
+          out=$(.juno-core/target/release/junod --proxies .juno-core/proxies \
+                  pack '${{ matrix.package }}' --out "$RUNNER_TEMP/dist")
+          echo "$out"
+          built=$(find "$RUNNER_TEMP/dist" -name '*.junodrv' -print -quit)
+
+          name="${GITHUB_REPOSITORY##*/}"
+          [ '${{ matrix.package }}' = '.' ] || name="$name-$(basename '${{ matrix.package }}')"
+          artifact="$name-${{ steps.meta.outputs.version }}.junodrv"
+
+          mv "$built" "$RUNNER_TEMP/$artifact"
+          cd "$RUNNER_TEMP"
+          sha=$(sha256sum "$artifact" | cut -d' ' -f1)
+          echo "$sha  $artifact" > "$artifact.sha256"
+
+          echo "artifact=$artifact" >> "$GITHUB_OUTPUT"
+          echo "sha256=$sha"        >> "$GITHUB_OUTPUT"
+
+      # A beta is a rolling prerelease: the tag is moved to the commit being built, so the
+      # "latest beta" link never goes stale and old betas do not accumulate forever.
+      - name: Publish to this repo's releases
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag='${{ steps.meta.outputs.release }}'
+          if [ '${{ steps.meta.outputs.channel }}' = beta ]; then
+            gh release delete "$tag" --repo "$GITHUB_REPOSITORY" --yes --cleanup-tag || true
+            gh release create "$tag" --repo "$GITHUB_REPOSITORY" --prerelease \
+              --target "$GITHUB_SHA" \
+              --title "Beta (${GITHUB_SHA:0:7})" \
+              --notes "Built from ${GITHUB_SHA:0:7}. Unreviewed — install for testing only."
+          fi
+          gh release upload "$tag" \
+            "$RUNNER_TEMP/${{ steps.pack.outputs.artifact }}" \
+            "$RUNNER_TEMP/${{ steps.pack.outputs.artifact }}.sha256" \
+            --repo "$GITHUB_REPOSITORY" --clobber
+
+      # Mirrored so a controller in a house has exactly one public host to fetch from, whether
+      # or not the driver's own repo is public. That matters for the drivers whose payloads
+      # will be encrypted later: the source repo can go private without breaking installs.
+      - name: Mirror the artifact
+        id: mirror
+        env:
+          GH_TOKEN: ${{ secrets.REGISTRY_TOKEN }}
+        run: |
+          tag='${{ github.event.repository.name }}-${{ steps.meta.outputs.version }}'
+          gh release create "$tag" --repo '${{ inputs.mirror-repo }}' \
+            --title "$tag" --notes "Mirrored from $GITHUB_REPOSITORY@${GITHUB_SHA:0:7}." \
+            ${{ steps.meta.outputs.channel == 'beta' && '--prerelease' || '' }} \
+            2>/dev/null || true
+          gh release upload "$tag" \
+            "$RUNNER_TEMP/${{ steps.pack.outputs.artifact }}" \
+            --repo '${{ inputs.mirror-repo }}' --clobber
+          echo "url=https://github.com/${{ inputs.mirror-repo }}/releases/download/$tag/${{ steps.pack.outputs.artifact }}" >> "$GITHUB_OUTPUT"
+
+      # The registry never parses a manifest. `junod entry` reads the archive that actually
+      # shipped and emits the index rows for every driver inside it — so a package carrying a
+      # bridge and its bulbs registers both, and there is exactly one TOML parser in the
+      # system rather than a second one in the registry drifting away from core's.
+      - name: Tell the registry
+        env:
+          GH_TOKEN: ${{ secrets.REGISTRY_TOKEN }}
+        run: |
+          .juno-core/target/release/junod --proxies .juno-core/proxies \
+            entry "$RUNNER_TEMP/${{ steps.pack.outputs.artifact }}" \
+            --repo "$GITHUB_REPOSITORY" \
+            --url '${{ steps.mirror.outputs.url }}' \
+            --sha256 '${{ steps.pack.outputs.sha256 }}' \
+            --version '${{ steps.meta.outputs.version }}' \
+            --description "$(gh repo view "$GITHUB_REPOSITORY" --json description -q .description)" \
+            > "$RUNNER_TEMP/entries.json"
+
+          jq -n \
+            --arg channel '${{ steps.meta.outputs.channel }}' \
+            --slurpfile entries "$RUNNER_TEMP/entries.json" \
+            '{event_type: "driver-published",
+              client_payload: {channel: $channel, entries: $entries[0]}}' \
+            | gh api "repos/${{ inputs.registry-repo }}/dispatches" --input -
