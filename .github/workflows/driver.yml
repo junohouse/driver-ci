@@ -51,10 +51,13 @@ concurrency:
 
 jobs:
   # -------------------------------------------------------------------------------------
-  # One job per package per platform. A driver is a native dylib, so "build once" is not
-  # available to us: the controller runs on macOS in some houses and Linux in others, and a
-  # package that carries only one of them fails at install time on the other, which is the
-  # worst place to find out.
+  # One job per package per platform. A driver is a native library, so "build once" is not
+  # available to us: a controller is macOS in some houses and Linux in others, and Linux is as
+  # often ARM as x86 — a small box in a cupboard, or this project's own container on Apple
+  # silicon. A package missing a platform fails at install time on that platform, which is the
+  # worst place to find out, and the failure reads as a broken driver rather than a missing
+  # build. Architecture is in the payload's name for the same reason: an x86-64 and an aarch64
+  # `.so` are both `.so`, and handing over the wrong one fails at dlopen saying nothing useful.
   # -------------------------------------------------------------------------------------
   build:
     strategy:
@@ -62,8 +65,9 @@ jobs:
       matrix:
         package: ${{ fromJSON(inputs.packages) }}
         target:
-          - { os: macos-14,      ext: dylib }
-          - { os: ubuntu-latest, ext: so }
+          - { os: macos-14,         payload: driver-macos-aarch64.dylib }
+          - { os: ubuntu-latest,    payload: driver-linux-x86_64.so }
+          - { os: ubuntu-24.04-arm, payload: driver-linux-aarch64.so }
     runs-on: ${{ matrix.target.os }}
     steps:
       - uses: actions/checkout@v5
@@ -95,22 +99,23 @@ jobs:
           cargo build --release --message-format=json-render-diagnostics \
             > "$RUNNER_TEMP/build.json"
 
+          ext='${{ matrix.target.payload }}'; ext="${ext##*.}"
           lib=$(jq -r 'select(.reason == "compiler-artifact")
                        | select(.target.kind[]? == "cdylib")
                        | .filenames[]?' "$RUNNER_TEMP/build.json" \
-                | grep '\.${{ matrix.target.ext }}$' | tail -1)
+                | grep "\\.$ext$" | tail -1)
 
           if [ -z "$lib" ]; then
-            echo "::error::cargo built no .${{ matrix.target.ext }} for ${{ matrix.package }} — is crate-type = [\"cdylib\"] set?"
+            echo "::error::cargo built no .$ext for ${{ matrix.package }} — is crate-type = [\"cdylib\"] set?"
             exit 1
           fi
           echo "collected $lib"
-          cp "$lib" "$RUNNER_TEMP/driver.${{ matrix.target.ext }}"
+          cp "$lib" "$RUNNER_TEMP/${{ matrix.target.payload }}"
 
       - uses: actions/upload-artifact@v5
         with:
-          name: lib-${{ env.SLUG }}-${{ matrix.target.ext }}
-          path: ${{ runner.temp }}/driver.${{ matrix.target.ext }}
+          name: lib-${{ env.SLUG }}-${{ matrix.target.payload }}
+          path: ${{ runner.temp }}/${{ matrix.target.payload }}
           if-no-files-found: error
 
   # -------------------------------------------------------------------------------------
@@ -196,7 +201,7 @@ jobs:
           merge-multiple: true
 
       - name: Stage the payloads beside the manifest
-        run: cp ${{ runner.temp }}/libs/driver.* '${{ matrix.package }}/'
+        run: cp ${{ runner.temp }}/libs/driver-* '${{ matrix.package }}/'
 
       # `pack` validates the manifest against the proxy contracts and refuses to write an
       # archive it would not install, so this is the certification step and the build step at
