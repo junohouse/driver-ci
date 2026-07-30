@@ -66,7 +66,7 @@ jobs:
           - { os: ubuntu-latest, ext: so }
     runs-on: ${{ matrix.target.os }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       # An artifact name cannot contain a slash, and a package directory can. Slugged once
       # here so the upload and the download in `publish` agree on the name.
@@ -103,7 +103,7 @@ jobs:
           fi
           cp "$lib" "$RUNNER_TEMP/driver.${{ matrix.target.ext }}"
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v5
         with:
           name: lib-${{ env.SLUG }}-${{ matrix.target.ext }}
           path: ${{ runner.temp }}/driver.${{ matrix.target.ext }}
@@ -123,7 +123,7 @@ jobs:
       matrix:
         package: ${{ fromJSON(inputs.packages) }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Name this package
         run: echo "SLUG=$(echo '${{ matrix.package }}' | tr '/.' '--')" >> "$GITHUB_ENV"
@@ -159,7 +159,7 @@ jobs:
       # Validation needs core's proxy contracts, and `junod` itself does the packaging and
       # emits the registry entry. A driver is only valid against a specific set of contracts,
       # so we check core out at the pinned ref rather than vendoring a copy that goes stale.
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           repository: junohouse/core
           ref: ${{ inputs.core-ref }}
@@ -174,7 +174,7 @@ jobs:
       - name: Build junod
         run: cargo build --release -p junod --manifest-path .juno-core/Cargo.toml
 
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v6
         with:
           pattern: lib-${{ env.SLUG }}-*
           path: ${{ runner.temp }}/libs
