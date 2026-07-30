@@ -221,20 +221,38 @@ jobs:
           echo "artifact=$artifact" >> "$GITHUB_OUTPUT"
           echo "sha256=$sha"        >> "$GITHUB_OUTPUT"
 
-      # A beta is a rolling prerelease: the tag is moved to the commit being built, so the
-      # "latest beta" link never goes stale and old betas do not accumulate forever.
+      # A beta is a rolling prerelease: the tag moves to the commit being built, so the
+      # "latest beta" link never goes stale and old betas do not pile up.
       - name: Publish to this repo's releases
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           tag='${{ steps.meta.outputs.release }}'
+          pkg='${{ matrix.package }}'
+
           if [ '${{ steps.meta.outputs.channel }}' = beta ]; then
-            gh release delete "$tag" --repo "$GITHUB_REPOSITORY" --yes --cleanup-tag || true
+            # Each package rolls its own beta. A repo shipping two of them runs this job
+            # twice at once, and one shared rolling release means the two race to delete and
+            # recreate it — with whichever deleted last dropping the other's artifact.
+            title="Beta (${GITHUB_SHA:0:7})"
+            if [ "$pkg" != '.' ]; then
+              tag="beta-$(basename "$pkg")"
+              title="Beta: $(basename "$pkg") (${GITHUB_SHA:0:7})"
+            fi
+            gh release delete "$tag" --repo "$GITHUB_REPOSITORY" --yes --cleanup-tag 2>/dev/null || true
             gh release create "$tag" --repo "$GITHUB_REPOSITORY" --prerelease \
-              --target "$GITHUB_SHA" \
-              --title "Beta (${GITHUB_SHA:0:7})" \
+              --target "$GITHUB_SHA" --title "$title" \
               --notes "Built from ${GITHUB_SHA:0:7}. Unreviewed — install for testing only."
+          else
+            # Pushing a tag does not create a release, so the first package to get here makes
+            # one and the second finds it and adds its artifact alongside. Both packages of a
+            # repo share the version tag, which is right: they were released together.
+            gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1 \
+              || gh release create "$tag" --repo "$GITHUB_REPOSITORY" \
+                   --title "$tag" --notes "Certified build of $GITHUB_REPOSITORY." \
+                   2>/dev/null || true
           fi
+
           gh release upload "$tag" \
             "$RUNNER_TEMP/${{ steps.pack.outputs.artifact }}" \
             "$RUNNER_TEMP/${{ steps.pack.outputs.artifact }}.sha256" \
