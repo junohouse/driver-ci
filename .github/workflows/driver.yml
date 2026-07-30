@@ -73,7 +73,7 @@ jobs:
       - name: Name this package
         run: echo "SLUG=$(echo '${{ matrix.package }}' | tr '/.' '--')" >> "$GITHUB_ENV"
 
-      # No credentials here on purpose. A driver depends only on juno-driver-sdk, which is
+      # No credentials here on purpose. A driver depends only on driver-sdk, which is
       # public and depends on nothing of ours, so building one needs no access to anything —
       # which is what makes a driver something an outsider can build and check for themselves.
       - uses: dtolnay/rust-toolchain@stable

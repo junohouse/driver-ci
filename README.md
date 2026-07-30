@@ -66,7 +66,7 @@ Set these once as **organization** secrets on `Juno-Certified-Drivers`, not per 
 | `REGISTRY_TOKEN` | Dispatch into `junohouse/registry`, write releases on the mirror |
 
 Building a driver needs **no credentials** — it depends only on the public
-[`juno-driver-sdk`](https://github.com/junohouse/juno-driver-sdk). `CORE_TOKEN` is used
+[`driver-sdk`](https://github.com/junohouse/driver-sdk). `CORE_TOKEN` is used
 only by the publish job, which runs `junod` to validate the manifest against the proxy
 contracts and to build the package.
 
