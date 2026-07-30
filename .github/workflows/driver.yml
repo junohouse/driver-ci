@@ -86,21 +86,30 @@ jobs:
         with:
           workspaces: ${{ matrix.package }}
 
-      - name: Build
-        working-directory: ${{ matrix.package }}
-        run: cargo build --release
-
-      # Renamed to the flat `driver.<ext>` the package format expects. The two platforms have
-      # different extensions, so both can sit in one archive without colliding and the
-      # controller picks the one it can actually load.
-      - name: Collect the library
+      # Ask cargo where it put the library rather than guessing a path. A repo shipping more
+      # than one package shares a workspace `target/` at the repo root, so the artifact is
+      # *not* under the package directory — and searching the shared directory by extension
+      # would happily pick up a sibling package's driver instead of this one's.
+      #
+      # The result is renamed to the flat `driver.<ext>` the package format expects. The two
+      # platforms have different extensions, so both sit in one archive without colliding and
+      # the controller picks the one it can actually load.
+      - name: Build and collect the library
         working-directory: ${{ matrix.package }}
         run: |
-          lib=$(find target/release -maxdepth 1 -name '*.${{ matrix.target.ext }}' -print -quit)
+          cargo build --release --message-format=json-render-diagnostics \
+            > "$RUNNER_TEMP/build.json"
+
+          lib=$(jq -r 'select(.reason == "compiler-artifact")
+                       | select(.target.kind[]? == "cdylib")
+                       | .filenames[]?' "$RUNNER_TEMP/build.json" \
+                | grep '\.${{ matrix.target.ext }}$' | tail -1)
+
           if [ -z "$lib" ]; then
-            echo "::error::cargo build produced no .${{ matrix.target.ext }} — is crate-type = [\"cdylib\"] set?"
+            echo "::error::cargo built no .${{ matrix.target.ext }} for ${{ matrix.package }} — is crate-type = [\"cdylib\"] set?"
             exit 1
           fi
+          echo "collected $lib"
           cp "$lib" "$RUNNER_TEMP/driver.${{ matrix.target.ext }}"
 
       - uses: actions/upload-artifact@v5
