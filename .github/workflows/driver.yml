@@ -73,14 +73,9 @@ jobs:
       - name: Name this package
         run: echo "SLUG=$(echo '${{ matrix.package }}' | tr '/.' '--')" >> "$GITHUB_ENV"
 
-      # Cargo resolves the SDK from a private repo. Its built-in git client cannot use the
-      # token; the CLI can, so hand the fetch to it rather than embedding credentials in a
-      # URL where they end up in build logs.
-      - name: Let cargo fetch the private SDK
-        run: |
-          echo "CARGO_NET_GIT_FETCH_WITH_CLI=true" >> "$GITHUB_ENV"
-          git config --global url."https://x-access-token:${{ secrets.CORE_TOKEN }}@github.com/".insteadOf "https://github.com/"
-
+      # No credentials here on purpose. A driver depends only on juno-driver-sdk, which is
+      # public and depends on nothing of ours, so building one needs no access to anything —
+      # which is what makes a driver something an outsider can build and check for themselves.
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:
@@ -140,9 +135,20 @@ jobs:
       - name: Work out the channel and the version
         id: meta
         run: |
-          declared=$(grep -m1 '^version' '${{ matrix.package }}/manifest.toml' | cut -d'"' -f2)
+          # One driver lives in manifest.toml; several live in manifests/. They share a
+          # version — one artifact cannot claim two versions of itself — so any of them
+          # answers the question, and disagreement between them is caught below.
+          pkg='${{ matrix.package }}'
+          versions=$(cat "$pkg"/manifest.toml "$pkg"/manifests/*.toml 2>/dev/null \
+                     | grep '^version' | cut -d'"' -f2 | sort -u)
+          declared=$(echo "$versions" | head -1)
+
           if [ -z "$declared" ]; then
-            echo "::error::${{ matrix.package }}/manifest.toml declares no version"
+            echo "::error::$pkg declares no drivers: expected manifest.toml or manifests/*.toml"
+            exit 1
+          fi
+          if [ "$(echo "$versions" | wc -l)" -gt 1 ]; then
+            echo "::error::$pkg's manifests disagree on the version: $(echo $versions)"
             exit 1
           fi
 

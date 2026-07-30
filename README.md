@@ -36,8 +36,8 @@ never resolve to one by accident.
 
 ## What it actually does
 
-1. Builds the driver as a native library on macOS **and** Linux. Both go in one package, so a
-   controller installs the same artifact whichever it runs.
+1. Builds the driver as a native library on macOS **and** Linux, with no credentials. Both go
+   in one package, so a controller installs the same artifact whichever it runs.
 2. Validates the manifest against core's proxy contracts. This is the certification step —
    `junod pack` refuses to write an archive it would not install, so there is no way to
    publish while skipping it.
@@ -62,10 +62,20 @@ Set these once as **organization** secrets on `Juno-Certified-Drivers`, not per 
 
 | Secret | Needs |
 | --- | --- |
-| `CORE_TOKEN` | Read access to `junohouse/core`, which is private and holds the SDK |
+| `CORE_TOKEN` | Read access to `junohouse/core`, for the packaging step |
 | `REGISTRY_TOKEN` | Dispatch into `junohouse/registry`, write releases on the mirror |
 
+Building a driver needs **no credentials** — it depends only on the public
+[`juno-driver-sdk`](https://github.com/junohouse/juno-driver-sdk). `CORE_TOKEN` is used
+only by the publish job, which runs `junod` to validate the manifest against the proxy
+contracts and to build the package.
+
 ## One package or two?
+
+A package with one driver keeps it in `manifest.toml`. A package with several puts them **all**
+in `manifests/` — one place to look, and no file privileged by where it sits. Which one leads
+is then stated outright: `primary = true` in `[driver]`, or inferred from a `parent`
+relationship where one exists.
 
 Bundle drivers into one package when they **share control code** — a Hue bridge and its bulbs,
 a Roku TV and a Roku player, an ecobee thermostat and its remote sensors. One payload carries
