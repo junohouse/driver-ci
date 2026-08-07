@@ -45,10 +45,28 @@ never resolve to one by accident.
    downloads from. There was a step here that mirrored the artifact into a shared `artifacts`
    repo so a controller had one public host regardless of whether the driver's repo was
    public. Every driver repo is public and already carries the file, so that was a second copy
-   of a published artifact, kept in step by hope. Bring it back if a driver repo ever needs to
-   go private.
+   of a published artifact, kept in step by hope.
 4. Tells the registry what it published. The registry merges what it is handed and scans
    nothing.
+
+## When a driver repo needs to be private
+
+Step 3 assumes the release it writes is one a controller can read. A private repo breaks that
+and nothing else: a house has no token and must never need one, so the *download* has to move
+somewhere anonymous while the build, the certification and the dispatch stay exactly as they
+are.
+
+The one public host already in the picture is `driver.juno.house` — controllers read the index
+from it, so serving payloads from it too means core and the catalog need no notion of where a
+driver came from. The seam is this step's `url` output: whatever publishes the payload writes
+the URL there, and the rest of the pipeline does not care.
+
+Put the payloads in an R2 bucket behind that domain rather than in the registry repo. Object
+storage keeps binaries out of git, and the registry's own site is redeployed wholesale on every
+publish — a place to serve files from, not to accumulate them.
+
+Restoring the deleted mirror repo would also work and is less setup, but it recreates a second
+copy of an artifact for every driver to solve it for the few that are private.
 
 ## Inputs
 
