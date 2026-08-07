@@ -25,21 +25,24 @@ on:
           code — Caséta's telnet and LEAP paths, say.
         type: string
         default: '["."]'
-      core-ref:
+      sdk-ref:
         description: >-
-          Ref of junohouse/core to build and validate against. Tracks main while core is
-          pre-release: pinning a driver to a tagged core only earns its keep once a core
-          release is a thing anyone is holding still for, and until then a pin means every
-          driver validates against contracts that are already stale.
+          Tag of junohouse/driver-sdk to validate and package against. The contracts live
+          there, so this is what a driver is checked against — and it is public, which is the
+          whole point: nothing here needs read access to a private repository any more.
         type: string
-        default: main
+        default: v0.5.0
       registry-repo:
         type: string
         default: junohouse/registry
     secrets:
       CORE_TOKEN:
-        description: Read access to junohouse/core, which is private.
-        required: true
+        description: >-
+          No longer used. The contracts and the packager moved to driver-sdk, which is public,
+          so a driver's CI needs nothing from the controller's repository. Kept declared and
+          optional so the driver repos that still pass it do not fail to start; drop it from
+          the caller at your leisure.
+        required: false
       REGISTRY_TOKEN:
         description: Dispatch into the registry.
         required: true
@@ -176,23 +179,16 @@ jobs:
             echo "release=beta" >> "$GITHUB_OUTPUT"
           fi
 
-      # Validation needs core's proxy contracts, and `junod` itself does the packaging and
-      # emits the registry entry. A driver is only valid against a specific set of contracts,
-      # so we check core out at the pinned ref rather than vendoring a copy that goes stale.
-      - uses: actions/checkout@v5
-        with:
-          repository: junohouse/core
-          ref: ${{ inputs.core-ref }}
-          path: .juno-core
-          token: ${{ secrets.CORE_TOKEN }}
-
+      # Everything this job needs — the proxy contracts, the manifest format, the archive
+      # layout and the index row — is in driver-sdk, which is public. It used to check out the
+      # controller for them, which meant every certified driver's CI carried a token for a
+      # private repository it has nothing to do with, and made "anyone can build a driver"
+      # false the moment somebody wanted to validate one.
       - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: .juno-core
-
-      - name: Build junod
-        run: cargo build --release -p junod --manifest-path .juno-core/Cargo.toml
+      - name: Install the packager
+        run: |
+          cargo install --locked --features pack \
+            --git https://github.com/junohouse/driver-sdk --tag ${{ inputs.sdk-ref }} driver-sdk
 
       - uses: actions/download-artifact@v6
         with:
@@ -209,8 +205,7 @@ jobs:
       - name: Validate and package
         id: pack
         run: |
-          out=$(.juno-core/target/release/junod --proxies .juno-core/proxies \
-                  pack '${{ matrix.package }}' --out "$RUNNER_TEMP/dist")
+          out=$(junodrv pack '${{ matrix.package }}' --out "$RUNNER_TEMP/dist")
           echo "$out"
           built=$(find "$RUNNER_TEMP/dist" -name '*.junodrv' -print -quit)
 
@@ -268,7 +263,7 @@ jobs:
           # driver's own public repo — no second copy to keep in step with this one.
           echo "url=https://github.com/$GITHUB_REPOSITORY/releases/download/$tag/${{ steps.pack.outputs.artifact }}" >> "$GITHUB_OUTPUT"
 
-      # The registry never parses a manifest. `junod entry` reads the archive that actually
+      # The registry never parses a manifest. `junodrv entry` reads the archive that actually
       # shipped and emits the index rows for every driver inside it — so a package carrying a
       # bridge and its bulbs registers both, and there is exactly one TOML parser in the
       # system rather than a second one in the registry drifting away from core's.
@@ -276,8 +271,7 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.REGISTRY_TOKEN }}
         run: |
-          .juno-core/target/release/junod --proxies .juno-core/proxies \
-            entry "$RUNNER_TEMP/${{ steps.pack.outputs.artifact }}" \
+          junodrv entry "$RUNNER_TEMP/${{ steps.pack.outputs.artifact }}" \
             --repo "$GITHUB_REPOSITORY" \
             --url '${{ steps.release.outputs.url }}' \
             --sha256 '${{ steps.pack.outputs.sha256 }}' \
