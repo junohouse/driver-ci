@@ -36,13 +36,6 @@ on:
         type: string
         default: junohouse/registry
     secrets:
-      CORE_TOKEN:
-        description: >-
-          No longer used. The contracts and the packager moved to driver-sdk, which is public,
-          so a driver's CI needs nothing from the controller's repository. Kept declared and
-          optional so the driver repos that still pass it do not fail to start; drop it from
-          the caller at your leisure.
-        required: false
       REGISTRY_TOKEN:
         description: Dispatch into the registry.
         required: true
