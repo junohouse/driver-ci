@@ -36,16 +36,12 @@ on:
       registry-repo:
         type: string
         default: junohouse/registry
-      mirror-repo:
-        description: Public repo that re-hosts artifacts so controllers never need a token.
-        type: string
-        default: Juno-Certified-Drivers/artifacts
     secrets:
       CORE_TOKEN:
         description: Read access to junohouse/core, which is private.
         required: true
       REGISTRY_TOKEN:
-        description: Dispatch into the registry, and write releases on the mirror.
+        description: Dispatch into the registry.
         required: true
 
 # Two builds of the same commit must not race to publish the same tag.
@@ -233,6 +229,7 @@ jobs:
       # A beta is a rolling prerelease: the tag moves to the commit being built, so the
       # "latest beta" link never goes stale and old betas do not pile up.
       - name: Publish to this repo's releases
+        id: release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -267,23 +264,9 @@ jobs:
             "$RUNNER_TEMP/${{ steps.pack.outputs.artifact }}.sha256" \
             --repo "$GITHUB_REPOSITORY" --clobber
 
-      # Mirrored so a controller in a house has exactly one public host to fetch from, whether
-      # or not the driver's own repo is public. That matters for the drivers whose payloads
-      # will be encrypted later: the source repo can go private without breaking installs.
-      - name: Mirror the artifact
-        id: mirror
-        env:
-          GH_TOKEN: ${{ secrets.REGISTRY_TOKEN }}
-        run: |
-          tag='${{ github.event.repository.name }}-${{ steps.meta.outputs.version }}'
-          gh release create "$tag" --repo '${{ inputs.mirror-repo }}' \
-            --title "$tag" --notes "Mirrored from $GITHUB_REPOSITORY@${GITHUB_SHA:0:7}." \
-            ${{ steps.meta.outputs.channel == 'beta' && '--prerelease' || '' }} \
-            2>/dev/null || true
-          gh release upload "$tag" \
-            "$RUNNER_TEMP/${{ steps.pack.outputs.artifact }}" \
-            --repo '${{ inputs.mirror-repo }}' --clobber
-          echo "url=https://github.com/${{ inputs.mirror-repo }}/releases/download/$tag/${{ steps.pack.outputs.artifact }}" >> "$GITHUB_OUTPUT"
+          # What the index will point a controller at. The release this job just wrote, on the
+          # driver's own public repo — no second copy to keep in step with this one.
+          echo "url=https://github.com/$GITHUB_REPOSITORY/releases/download/$tag/${{ steps.pack.outputs.artifact }}" >> "$GITHUB_OUTPUT"
 
       # The registry never parses a manifest. `junod entry` reads the archive that actually
       # shipped and emits the index rows for every driver inside it — so a package carrying a
@@ -296,7 +279,7 @@ jobs:
           .juno-core/target/release/junod --proxies .juno-core/proxies \
             entry "$RUNNER_TEMP/${{ steps.pack.outputs.artifact }}" \
             --repo "$GITHUB_REPOSITORY" \
-            --url '${{ steps.mirror.outputs.url }}' \
+            --url '${{ steps.release.outputs.url }}' \
             --sha256 '${{ steps.pack.outputs.sha256 }}' \
             --version '${{ steps.meta.outputs.version }}' \
             --description "$(gh repo view "$GITHUB_REPOSITORY" --json description -q .description)" \

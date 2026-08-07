@@ -41,10 +41,13 @@ never resolve to one by accident.
 2. Validates the manifest against core's proxy contracts. This is the certification step —
    `junod pack` refuses to write an archive it would not install, so there is no way to
    publish while skipping it.
-3. Packages, digests, and publishes to the driver's own releases.
-4. Mirrors the artifact to [`Juno-Certified-Drivers/artifacts`](https://github.com/Juno-Certified-Drivers/artifacts),
-   the public host controllers download from.
-5. Tells the registry what it published. The registry merges what it is handed and scans
+3. Packages, digests, and publishes to the driver's own releases — which is what a controller
+   downloads from. There was a step here that mirrored the artifact into a shared `artifacts`
+   repo so a controller had one public host regardless of whether the driver's repo was
+   public. Every driver repo is public and already carries the file, so that was a second copy
+   of a published artifact, kept in step by hope. Bring it back if a driver repo ever needs to
+   go private.
+4. Tells the registry what it published. The registry merges what it is handed and scans
    nothing.
 
 ## Inputs
@@ -52,9 +55,8 @@ never resolve to one by accident.
 | Input | Default | Why you would change it |
 | --- | --- | --- |
 | `packages` | `'["."]'` | A repo shipping more than one package: `'["cloud", "hap"]'` |
-| `core-ref` | `v0.1.0` | The core tag to build and validate against |
+| `core-ref` | `main` | The core ref to build and validate against |
 | `registry-repo` | `junohouse/registry` | |
-| `mirror-repo` | `Juno-Certified-Drivers/artifacts` | |
 
 ## Secrets
 
@@ -63,7 +65,7 @@ Set these once as **organization** secrets on `Juno-Certified-Drivers`, not per 
 | Secret | Needs |
 | --- | --- |
 | `CORE_TOKEN` | Read access to `junohouse/core`, for the packaging step |
-| `REGISTRY_TOKEN` | Dispatch into `junohouse/registry`, write releases on the mirror |
+| `REGISTRY_TOKEN` | Dispatch into `junohouse/registry` |
 
 Building a driver needs **no credentials** — it depends only on the public
 [`driver-sdk`](https://github.com/junohouse/driver-sdk). `CORE_TOKEN` is used
