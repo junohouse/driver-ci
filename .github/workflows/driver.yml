@@ -26,9 +26,13 @@ on:
         type: string
         default: '["."]'
       core-ref:
-        description: Tag of junohouse/core to build and validate against.
+        description: >-
+          Ref of junohouse/core to build and validate against. Tracks main while core is
+          pre-release: pinning a driver to a tagged core only earns its keep once a core
+          release is a thing anyone is holding still for, and until then a pin means every
+          driver validates against contracts that are already stale.
         type: string
-        default: v0.1.0
+        default: main
       registry-repo:
         type: string
         default: junohouse/registry
