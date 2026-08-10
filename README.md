@@ -74,11 +74,38 @@ copy of an artifact for every driver to solve it for the few that are private.
 | --- | --- | --- |
 | `packages` | `'["."]'` | A repo shipping more than one package: `'["cloud", "hap"]'` |
 | `sdk-ref` | `main` | Pin one build to a particular driver-sdk branch |
+| `stamp-property` | `''` | A vendor integration key — see below |
 | `registry-repo` | `junohouse/registry` | |
 
 `sdk-ref` is a branch, not a tag. The proxy contracts live in driver-sdk and move with it, so
 validating against a pinned tag means a capability that plainly exists on `main` is reported as
 unknown — which is the trade core stopped making when it dropped tags from its own dependency.
+
+## A vendor integration key
+
+Some vendors issue a key per *integration* rather than per house — Sonos does. It has to
+reach the driver, and it must not be committed to a public repo.
+
+Set `stamp-property` to the name of a `[[property]]` in the manifest, and `VENDOR_KEY` as an
+organization secret. The publish job writes the key into that property's `default` just before
+packaging:
+
+```yaml
+with:
+  stamp-property: Sonos API Key
+secrets:
+  REGISTRY_TOKEN: ${{ secrets.REGISTRY_TOKEN }}
+  VENDOR_KEY: ${{ secrets.SONOS_API_KEY }}
+```
+
+The manifest, not the source. The build job stays credential-free — which is what lets anyone
+build a driver without secrets — rotating the key is a repackage rather than a recompile, and
+nothing lands in git. A following step fails the build if the key also appears inside a
+compiled library, because a second copy is one nobody can rotate.
+
+This is **obfuscation, not secrecy**. The artifact is downloadable and anyone can read a
+string out of it. Declare the property so an installer can set their own key instead, and
+treat a shipped key as something that will eventually need rotating.
 
 ## Secrets
 

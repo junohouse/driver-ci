@@ -42,10 +42,27 @@ on:
       registry-repo:
         type: string
         default: junohouse/registry
+      stamp-property:
+        description: >-
+          Name of a manifest `[[property]]` whose `default` should receive the `VENDOR_KEY`
+          secret at package time. Empty, and nothing is stamped.
+
+          For an integration key that belongs to the vendor rather than to a house — Sonos
+          issues one per integration, not one per household. It goes in here rather than in
+          the driver's source so the build job stays credential-free, so rotating it is a
+          repackage rather than a recompile, and so it is never committed to a public repo.
+
+          It is obfuscation, not a secret: the artifact is downloadable and anyone can read a
+          string out of it. The property exists so a house can set its own instead.
+        type: string
+        default: ''
     secrets:
       REGISTRY_TOKEN:
         description: Dispatch into the registry.
         required: true
+      VENDOR_KEY:
+        description: Stamped into `stamp-property`. Required only when that input is set.
+        required: false
 
 # Two builds of the same commit must not race to publish the same tag.
 concurrency:
@@ -198,6 +215,76 @@ jobs:
 
       - name: Stage the payloads beside the manifest
         run: cp ${{ runner.temp }}/libs/driver-* '${{ matrix.package }}/'
+
+      # The key never goes near the build job, which is credential-free on purpose — it is
+      # written into the manifest here, where the secrets already are. So rotating it is a
+      # repackage rather than a recompile, and no source change at all.
+      - name: Stamp the vendor key
+        if: inputs.stamp-property != ''
+        env:
+          PKG: ${{ matrix.package }}
+          PROP: ${{ inputs.stamp-property }}
+          KEY: ${{ secrets.VENDOR_KEY }}
+        run: |
+          if [ -z "$KEY" ]; then
+            echo "::error::stamp-property is '$PROP' but VENDOR_KEY is empty. Set it as an \
+          organization secret, or drop the input."
+            exit 1
+          fi
+          python3 - <<'PY'
+          import os, pathlib, sys
+
+          pkg, prop, key = os.environ["PKG"], os.environ["PROP"], os.environ["KEY"]
+          root = pathlib.Path(pkg)
+          files = sorted(root.glob("manifests/*.toml")) or [root / "manifest.toml"]
+
+          stamped = 0
+          for f in files:
+              lines, out, in_block, done = f.read_text().splitlines(), [], False, False
+              for line in lines:
+                  s = line.strip()
+                  # A new table ends whatever block we were in.
+                  if s.startswith("[") and not s.startswith("[["):
+                      in_block = False
+                  elif s == "[[property]]":
+                      in_block = False
+                  if s == f'name = "{prop}"':
+                      in_block = True
+                  # Replace an existing default inside the matched block rather than adding a
+                  # second one — TOML takes the first and the edit would silently do nothing.
+                  if in_block and s.startswith("default ="):
+                      continue
+                  out.append(line)
+                  if in_block and s == f'name = "{prop}"':
+                      out.append(f'default = "{key}"')
+                      stamped += 1
+                      done = True
+              if done:
+                  f.write_text("\n".join(out) + "\n")
+
+          if stamped != 1:
+              sys.exit(f"expected exactly one `{prop}` property to stamp, found {stamped}")
+          print(f"stamped `{prop}` in {pkg}")
+          PY
+
+      # The key belongs in the manifest, which is data. A copy compiled into the library is a
+      # second one nobody can rotate — and the whole point of stamping is that there is one
+      # place to change it. Catches the day somebody "simplifies" it back into the Rust.
+      - name: The key is not in the compiled library
+        if: inputs.stamp-property != ''
+        env:
+          PKG: ${{ matrix.package }}
+          KEY: ${{ secrets.VENDOR_KEY }}
+        run: |
+          for lib in "$PKG"/driver-*; do
+            [ -f "$lib" ] || continue
+            if grep -qF -- "$KEY" "$lib"; then
+              echo "::error::$lib contains the vendor key. It belongs in the manifest \
+          property, not in the source — see the stamp-property input."
+              exit 1
+            fi
+          done
+          echo "no compiled copy of the key"
 
       # `pack` validates the manifest against the proxy contracts and refuses to write an
       # archive it would not install, so this is the certification step and the build step at
