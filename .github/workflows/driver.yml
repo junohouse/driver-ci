@@ -226,10 +226,14 @@ jobs:
           PROP: ${{ inputs.stamp-property }}
           KEY: ${{ secrets.VENDOR_KEY }}
         run: |
+          # No key yet is a real state, not a mistake: a driver ships before its vendor
+          # account exists, and the manifest marks the property `required` so a household
+          # reads as "not set up" rather than as one that quietly never connects. Warn and
+          # carry on, and start stamping by itself the day the secret appears.
           if [ -z "$KEY" ]; then
-            echo "::error::stamp-property is '$PROP' but VENDOR_KEY is empty. Set it as an \
-          organization secret, or drop the input."
-            exit 1
+            echo "::warning::VENDOR_KEY is empty, so '$PROP' ships unset. Installers must \
+          supply their own. Set it as an organization secret to stamp one in."
+            exit 0
           fi
           python3 - <<'PY'
           import os, pathlib, sys
@@ -276,6 +280,12 @@ jobs:
           PKG: ${{ matrix.package }}
           KEY: ${{ secrets.VENDOR_KEY }}
         run: |
+          # An empty needle matches every line of every file, so without this the scan fails
+          # every build that has no key to look for.
+          if [ -z "$KEY" ]; then
+            echo "no key to look for"
+            exit 0
+          fi
           for lib in "$PKG"/driver-*; do
             [ -f "$lib" ] || continue
             if grep -qF -- "$KEY" "$lib"; then
