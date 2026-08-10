@@ -27,11 +27,18 @@ on:
         default: '["."]'
       sdk-ref:
         description: >-
-          Tag of junohouse/driver-sdk to validate and package against. The contracts live
+          Branch of junohouse/driver-sdk to validate and package against. The contracts live
           there, so this is what a driver is checked against — and it is public, which is the
           whole point: nothing here needs read access to a private repository any more.
+
+          A branch rather than a tag, and `main` rather than a pinned one. This defaulted to
+          v0.5.0 while the SDK was at 0.13, so a contract added on main was invisible here and
+          a driver declaring a capability that plainly existed failed certification saying it
+          did not. That is the same trade core's own Cargo.toml describes giving up on: "a
+          contract change that missed a tag, a consumer that would not compile because of it".
+          Pass a ref explicitly to pin one build.
         type: string
-        default: v0.5.0
+        default: main
       registry-repo:
         type: string
         default: junohouse/registry
@@ -181,7 +188,7 @@ jobs:
       - name: Install the packager
         run: |
           cargo install --locked --features pack \
-            --git https://github.com/junohouse/driver-sdk --tag ${{ inputs.sdk-ref }} driver-sdk
+            --git https://github.com/junohouse/driver-sdk --branch ${{ inputs.sdk-ref }} driver-sdk
 
       - uses: actions/download-artifact@v6
         with:

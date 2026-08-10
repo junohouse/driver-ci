@@ -73,8 +73,12 @@ copy of an artifact for every driver to solve it for the few that are private.
 | Input | Default | Why you would change it |
 | --- | --- | --- |
 | `packages` | `'["."]'` | A repo shipping more than one package: `'["cloud", "hap"]'` |
-| `core-ref` | `main` | The core ref to build and validate against |
+| `sdk-ref` | `main` | Pin one build to a particular driver-sdk branch |
 | `registry-repo` | `junohouse/registry` | |
+
+`sdk-ref` is a branch, not a tag. The proxy contracts live in driver-sdk and move with it, so
+validating against a pinned tag means a capability that plainly exists on `main` is reported as
+unknown — which is the trade core stopped making when it dropped tags from its own dependency.
 
 ## Secrets
 
