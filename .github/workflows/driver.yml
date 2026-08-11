@@ -1,14 +1,20 @@
-# The one workflow every certified driver calls.
+# Build, validate and package a Juno driver. Public, and needs no credentials.
 #
-# Doing the build here rather than in each driver repo is the point: "certified" means an
-# artifact came out of THIS workflow, so the validation step cannot be skipped by a driver
-# author in a hurry. A driver repo's own workflow is six lines and has no logic in it — which
-# is also why its Actions page is readable: one run, one job list, no matrix to decode.
+# Doing the build here rather than in each driver repo is the point: the validation step cannot
+# be skipped by a driver author in a hurry. A driver repo's own workflow is six lines and has no
+# logic in it — which is also why its Actions page is readable: one run, one job list, no matrix
+# to decode. It depends only on driver-sdk, which is public, so a third party writing their own
+# driver gets exactly the build and exactly the validation a first-party driver gets.
+#
+# What it deliberately does NOT do is touch the registry. Indexing a driver as *certified* is a
+# claim about provenance, and a workflow anyone can call cannot make that claim about itself.
+# That step lives in `certified.yml` in the private registry repo, which calls this file for the
+# build — and which, being private, can only be called from inside the organisation.
 #
 # Two channels, decided by what triggered the run:
 #
-#   push to a v* tag  ->  stable   ->  GitHub release, indexed in index.json
-#   push to a branch  ->  beta     ->  rolling prerelease, indexed in beta.json
+#   push to a v* tag  ->  stable   ->  release v1.2.0
+#   push to a branch  ->  beta     ->  rolling `beta` prerelease
 #
 # A beta version is the manifest's version with a prerelease suffix (1.2.0-beta.41), which
 # sorts *below* 1.2.0 under semver. A controller on the stable channel therefore cannot be
@@ -39,9 +45,13 @@ on:
           Pass a ref explicitly to pin one build.
         type: string
         default: main
-      registry-repo:
-        type: string
-        default: junohouse/registry
+      release:
+        description: >-
+          Publish the package to this repository's own releases, which is how a public driver
+          is distributed. Turn it off when something downstream is doing the publishing — the
+          certified pipeline puts payloads on a host a controller can read without a token.
+        type: boolean
+        default: true
       stamp-property:
         description: >-
           Name of a manifest `[[property]]` whose `default` should receive the `VENDOR_KEY`
@@ -57,12 +67,13 @@ on:
         type: string
         default: ''
     secrets:
-      REGISTRY_TOKEN:
-        description: Dispatch into the registry.
-        required: true
       VENDOR_KEY:
         description: Stamped into `stamp-property`. Required only when that input is set.
         required: false
+    outputs:
+      channel:
+        description: stable or beta, from what triggered the run.
+        value: ${{ jobs.publish.outputs.channel }}
 
 # Two builds of the same commit must not race to publish the same tag.
 concurrency:
@@ -139,14 +150,21 @@ jobs:
           if-no-files-found: error
 
   # -------------------------------------------------------------------------------------
-  # Validate, package, publish, and tell the registry. One job per package, after every
-  # platform for it has been built.
+  # Validate, package, and hand the result on. One job per package, after every platform for
+  # it has been built.
+  #
+  # The packed `.junodrv` leaves here as a workflow artifact whether or not it is released,
+  # because that is the seam the certified pipeline picks it up from. A matrix job cannot
+  # usefully return per-package outputs — GitHub keeps only the last one — so the metadata
+  # travels beside the payload as a file instead.
   # -------------------------------------------------------------------------------------
   publish:
     needs: build
     runs-on: ubuntu-latest
     permissions:
       contents: write
+    outputs:
+      channel: ${{ steps.meta.outputs.channel }}
     strategy:
       fail-fast: false
       matrix:
@@ -302,6 +320,7 @@ jobs:
       - name: Validate and package
         id: pack
         run: |
+          mkdir -p "$RUNNER_TEMP/out"
           out=$(junodrv pack '${{ matrix.package }}' --out "$RUNNER_TEMP/dist")
           echo "$out"
           built=$(find "$RUNNER_TEMP/dist" -name '*.junodrv' -print -quit)
@@ -310,17 +329,37 @@ jobs:
           [ '${{ matrix.package }}' = '.' ] || name="$name-$(basename '${{ matrix.package }}')"
           artifact="$name-${{ steps.meta.outputs.version }}.junodrv"
 
-          mv "$built" "$RUNNER_TEMP/$artifact"
-          cd "$RUNNER_TEMP"
+          mv "$built" "$RUNNER_TEMP/out/$artifact"
+          cd "$RUNNER_TEMP/out"
           sha=$(sha256sum "$artifact" | cut -d' ' -f1)
           echo "$sha  $artifact" > "$artifact.sha256"
+
+          # Beside the payload rather than as a job output: this job is a matrix, and a matrix
+          # job's outputs are overwritten by whichever leg finishes last.
+          jq -n --arg package '${{ matrix.package }}' \
+                --arg artifact "$artifact" \
+                --arg sha256 "$sha" \
+                --arg version '${{ steps.meta.outputs.version }}' \
+                --arg channel '${{ steps.meta.outputs.channel }}' \
+                --arg tag '${{ steps.meta.outputs.release }}' \
+                '$ARGS.named' > meta.json
 
           echo "artifact=$artifact" >> "$GITHUB_OUTPUT"
           echo "sha256=$sha"        >> "$GITHUB_OUTPUT"
 
+      # The packed archive and its metadata, for whatever runs next. A third-party driver stops
+      # at the release below; the certified pipeline downloads this and publishes it somewhere
+      # a controller can reach without a token.
+      - uses: actions/upload-artifact@v5
+        with:
+          name: pkg-${{ env.SLUG }}
+          path: ${{ runner.temp }}/out
+          if-no-files-found: error
+
       # A beta is a rolling prerelease: the tag moves to the commit being built, so the
       # "latest beta" link never goes stale and old betas do not pile up.
       - name: Publish to this repo's releases
+        if: inputs.release
         id: release
         env:
           GH_TOKEN: ${{ github.token }}
@@ -352,33 +391,6 @@ jobs:
           fi
 
           gh release upload "$tag" \
-            "$RUNNER_TEMP/${{ steps.pack.outputs.artifact }}" \
-            "$RUNNER_TEMP/${{ steps.pack.outputs.artifact }}.sha256" \
+            "$RUNNER_TEMP/out/${{ steps.pack.outputs.artifact }}" \
+            "$RUNNER_TEMP/out/${{ steps.pack.outputs.artifact }}.sha256" \
             --repo "$GITHUB_REPOSITORY" --clobber
-
-          # What the index will point a controller at. The release this job just wrote, on the
-          # driver's own public repo — no second copy to keep in step with this one.
-          echo "url=https://github.com/$GITHUB_REPOSITORY/releases/download/$tag/${{ steps.pack.outputs.artifact }}" >> "$GITHUB_OUTPUT"
-
-      # The registry never parses a manifest. `junodrv entry` reads the archive that actually
-      # shipped and emits the index rows for every driver inside it — so a package carrying a
-      # bridge and its bulbs registers both, and there is exactly one TOML parser in the
-      # system rather than a second one in the registry drifting away from core's.
-      - name: Tell the registry
-        env:
-          GH_TOKEN: ${{ secrets.REGISTRY_TOKEN }}
-        run: |
-          junodrv entry "$RUNNER_TEMP/${{ steps.pack.outputs.artifact }}" \
-            --repo "$GITHUB_REPOSITORY" \
-            --url '${{ steps.release.outputs.url }}' \
-            --sha256 '${{ steps.pack.outputs.sha256 }}' \
-            --version '${{ steps.meta.outputs.version }}' \
-            --description "$(gh repo view "$GITHUB_REPOSITORY" --json description -q .description)" \
-            > "$RUNNER_TEMP/entries.json"
-
-          jq -n \
-            --arg channel '${{ steps.meta.outputs.channel }}' \
-            --slurpfile entries "$RUNNER_TEMP/entries.json" \
-            '{event_type: "driver-published",
-              client_payload: {channel: $channel, entries: $entries[0]}}' \
-            | gh api "repos/${{ inputs.registry-repo }}/dispatches" --input -

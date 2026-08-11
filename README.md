@@ -1,6 +1,10 @@
 # Juno driver CI
 
-The one workflow every certified driver calls. A driver repo's own workflow is this:
+Build, validate and package a Juno driver. Public, and needs no credentials — anyone can call
+this on their own driver and get exactly the build and exactly the validation a first-party
+driver gets.
+
+A driver repo's own workflow is this:
 
 ```yaml
 name: release
@@ -11,62 +15,39 @@ on:
 
 jobs:
   driver:
-    uses: junohouse/driver-ci/.github/workflows/driver.yml@v1
+    uses: junohouse/driver-ci/.github/workflows/driver.yml@main
     permissions:
       contents: write
-    secrets: inherit
 ```
 
 Push to `main` for a beta. Tag `v1.2.0` for a release. That is the whole interface.
 
-The `permissions` block is not optional. Publishing writes releases, a called workflow cannot
-request more permission than its caller was granted, and the default `GITHUB_TOKEN` is
-read-only — so leaving it out fails the run before any job starts, with an error naming this
-workflow rather than the caller that is actually missing a line.
+The `permissions` block is not optional while `release` is on. Publishing writes releases, a
+called workflow cannot request more permission than its caller was granted, and the default
+`GITHUB_TOKEN` is read-only — so leaving it out fails the run before any job starts, with an
+error naming this workflow rather than the caller that is actually missing a line.
 
 ## What you get
 
 | Trigger | Channel | Version | Where it lands |
 | --- | --- | --- | --- |
-| push to `main` | beta | `1.2.0-beta.41` | rolling `beta` prerelease, `beta.json` |
-| tag `v1.2.0` | stable | `1.2.0` | release `v1.2.0`, `index.json` |
+| push to `main` | beta | `1.2.0-beta.41` | rolling `beta` prerelease on your repo |
+| tag `v1.2.0` | stable | `1.2.0` | release `v1.2.0` on your repo |
 
 A beta version sorts *below* the release it previews, so a controller following stable can
 never resolve to one by accident.
 
 ## What it actually does
 
-1. Builds the driver as a native library on macOS **and** Linux, with no credentials. Both go
-   in one package, so a controller installs the same artifact whichever it runs.
-2. Validates the manifest against core's proxy contracts. This is the certification step —
-   `junod pack` refuses to write an archive it would not install, so there is no way to
-   publish while skipping it.
-3. Packages, digests, and publishes to the driver's own releases — which is what a controller
-   downloads from. There was a step here that mirrored the artifact into a shared `artifacts`
-   repo so a controller had one public host regardless of whether the driver's repo was
-   public. Every driver repo is public and already carries the file, so that was a second copy
-   of a published artifact, kept in step by hope.
-4. Tells the registry what it published. The registry merges what it is handed and scans
-   nothing.
-
-## When a driver repo needs to be private
-
-Step 3 assumes the release it writes is one a controller can read. A private repo breaks that
-and nothing else: a house has no token and must never need one, so the *download* has to move
-somewhere anonymous while the build, the certification and the dispatch stay exactly as they
-are.
-
-The one public host already in the picture is `driver.juno.house` — controllers read the index
-from it, so serving payloads from it too means core and the catalog need no notion of where a
-driver came from. The seam is this step's `url` output: whatever publishes the payload writes
-the URL there, and the rest of the pipeline does not care.
-
-Put the payloads in an R2 bucket behind that domain rather than in the registry repo. Object
-storage keeps binaries out of git, and the registry's own site is redeployed wholesale on every
-publish — a place to serve files from, not to accumulate them.
-
-Restoring the deleted mirror repo would also work and is less setup, but it recreates a second
-copy of an artifact for every driver to solve it for the few that are private.
+1. Builds the driver as a native library on macOS **and** Linux, x86-64 and ARM, with no
+   credentials. All of them go in one package, so a controller installs the same artifact
+   whichever it runs.
+2. Validates the manifest against the real proxy contracts. `junodrv pack` refuses to write an
+   archive it would not install, so the build step and the validation step are the same step
+   and there is no way to skip one.
+3. Packages and digests it, and uploads the result as a workflow artifact — `pkg-<package>`,
+   holding the `.junodrv`, its `.sha256`, and a `meta.json` describing the build.
+4. Publishes it to your repository's own releases, unless you turn `release` off.
 
 ## Inputs
 
@@ -74,17 +55,21 @@ copy of an artifact for every driver to solve it for the few that are private.
 | --- | --- | --- |
 | `packages` | `'["."]'` | A repo shipping more than one package: `'["cloud", "hap"]'` |
 | `sdk-ref` | `main` | Pin one build to a particular driver-sdk branch |
+| `release` | `true` | Off when something downstream publishes the payload instead |
 | `stamp-property` | `''` | A vendor integration key — see below |
-| `registry-repo` | `junohouse/registry` | |
 
 `sdk-ref` is a branch, not a tag. The proxy contracts live in driver-sdk and move with it, so
 validating against a pinned tag means a capability that plainly exists on `main` is reported as
 unknown — which is the trade core stopped making when it dropped tags from its own dependency.
 
+There are no required secrets. Building a driver depends only on the public
+[driver-sdk](https://github.com/junohouse/driver-sdk), which depends on nothing of Juno's —
+which is what makes a driver something an outsider can build, check, and ship for themselves.
+
 ## A vendor integration key
 
-Some vendors issue a key per *integration* rather than per house — Sonos does. It has to
-reach the driver, and it must not be committed to a public repo.
+Some vendors issue a key per *integration* rather than per house — Sonos does. It has to reach
+the driver, and it must not be committed to a public repo.
 
 Set `stamp-property` to the name of a `[[property]]` in the manifest, and `VENDOR_KEY` as an
 organization secret. The publish job writes the key into that property's `default` just before
@@ -94,7 +79,6 @@ packaging:
 with:
   stamp-property: Sonos API Key
 secrets:
-  REGISTRY_TOKEN: ${{ secrets.REGISTRY_TOKEN }}
   VENDOR_KEY: ${{ secrets.SONOS_API_KEY }}
 ```
 
@@ -107,19 +91,28 @@ This is **obfuscation, not secrecy**. The artifact is downloadable and anyone ca
 string out of it. Declare the property so an installer can set their own key instead, and
 treat a shipped key as something that will eventually need rotating.
 
-## Secrets
+## What this workflow will not do
 
-Set these once as **organization** secrets on `Juno-Certified-Drivers`, not per repo.
+It does not touch the registry. Being listed at [driver.juno.house](https://driver.juno.house)
+as **certified** is a claim about where an artifact came from, and a workflow anyone may call
+cannot make that claim about itself.
 
-| Secret | Needs |
-| --- | --- |
-| `CORE_TOKEN` | Read access to `junohouse/core`, for the packaging step |
-| `REGISTRY_TOKEN` | Dispatch into `junohouse/registry` |
+Indexing lives in `certified.yml` in the private registry repo. It calls this one for the
+build, then puts the payload on a host controllers can read without a token and dispatches the
+index row. A reusable workflow in a private repository can only be called from inside its own
+organisation, so the provenance claim is enforced by GitHub rather than by everybody agreeing
+not to.
 
-Building a driver needs **no credentials** — it depends only on the public
-[`driver-sdk`](https://github.com/junohouse/driver-sdk). `CORE_TOKEN` is used
-only by the publish job, which runs `junod` to validate the manifest against the proxy
-contracts and to build the package.
+That is a claim about provenance, **not a safety audit**, and it is worth being precise about
+because the controller UI shows it to residents.
+
+## Third-party drivers
+
+Nothing above is required to write or ship a Juno driver. A controller will install any
+`.junodrv` handed to it — it labels the driver *Third-party*, and never auto-updates it. Use
+this workflow to build one, publish it on your own releases, and tell people the URL.
+
+The documentation for writing one is at [docs.juno.house](https://docs.juno.house).
 
 ## One package or two?
 
@@ -141,6 +134,5 @@ fragile as it sounds.
 
 ## This repo is public on purpose
 
-A reusable workflow in a private repo cannot be called from another organization, and the
-drivers live in `Juno-Certified-Drivers`. There are no secrets in this file — they are passed
-in by the caller.
+A reusable workflow in a private repo cannot be called from another organisation, and the point
+of this one is that it can. There are no secrets in it — the private half passes its own in.
