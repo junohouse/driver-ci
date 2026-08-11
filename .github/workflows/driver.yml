@@ -211,7 +211,18 @@ jobs:
             # resolve to it. run_number rather than the sha so betas order by recency.
             echo "channel=beta" >> "$GITHUB_OUTPUT"
             echo "version=$declared-beta.$GITHUB_RUN_NUMBER" >> "$GITHUB_OUTPUT"
-            echo "release=beta" >> "$GITHUB_OUTPUT"
+
+            # Each package rolls its own beta. A repo shipping two of them runs this job twice
+            # at once, and one shared rolling release means the two race to delete and recreate
+            # it — with whichever deleted last dropping the other's artifact.
+            #
+            # Decided here rather than in the release step below so that the tag reaches
+            # meta.json, which is how anything downstream works out the download URL.
+            if [ "$pkg" = '.' ]; then
+              echo "release=beta" >> "$GITHUB_OUTPUT"
+            else
+              echo "release=beta-$(basename "$pkg")" >> "$GITHUB_OUTPUT"
+            fi
           fi
 
       # Everything this job needs — the proxy contracts, the manifest format, the archive
@@ -348,8 +359,7 @@ jobs:
           echo "sha256=$sha"        >> "$GITHUB_OUTPUT"
 
       # The packed archive and its metadata, for whatever runs next. A third-party driver stops
-      # at the release below; the certified pipeline downloads this and publishes it somewhere
-      # a controller can reach without a token.
+      # at the release below; the certified pipeline picks this up to index what was published.
       - uses: actions/upload-artifact@v5
         with:
           name: pkg-${{ env.SLUG }}
@@ -368,14 +378,9 @@ jobs:
           pkg='${{ matrix.package }}'
 
           if [ '${{ steps.meta.outputs.channel }}' = beta ]; then
-            # Each package rolls its own beta. A repo shipping two of them runs this job
-            # twice at once, and one shared rolling release means the two race to delete and
-            # recreate it — with whichever deleted last dropping the other's artifact.
+            # The per-package tag was decided in `meta`, so that meta.json carries it.
             title="Beta (${GITHUB_SHA:0:7})"
-            if [ "$pkg" != '.' ]; then
-              tag="beta-$(basename "$pkg")"
-              title="Beta: $(basename "$pkg") (${GITHUB_SHA:0:7})"
-            fi
+            [ "$pkg" = '.' ] || title="Beta: $(basename "$pkg") (${GITHUB_SHA:0:7})"
             gh release delete "$tag" --repo "$GITHUB_REPOSITORY" --yes --cleanup-tag 2>/dev/null || true
             gh release create "$tag" --repo "$GITHUB_REPOSITORY" --prerelease \
               --target "$GITHUB_SHA" --title "$title" \

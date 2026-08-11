@@ -97,11 +97,10 @@ It does not touch the registry. Being listed at [driver.juno.house](https://driv
 as **certified** is a claim about where an artifact came from, and a workflow anyone may call
 cannot make that claim about itself.
 
-Indexing lives in `certified.yml` in the private registry repo. It calls this one for the
-build, then puts the payload on a host controllers can read without a token and dispatches the
-index row. A reusable workflow in a private repository can only be called from inside its own
-organisation, so the provenance claim is enforced by GitHub rather than by everybody agreeing
-not to.
+Indexing lives in `certified.yml` in the private registry repo. It calls this one for the build
+and the release, then dispatches the index row. A reusable workflow in a private repository can
+only be called from inside its own organisation, so the provenance claim is enforced by GitHub
+rather than by everybody agreeing not to.
 
 That is a claim about provenance, **not a safety audit**, and it is worth being precise about
 because the controller UI shows it to residents.
