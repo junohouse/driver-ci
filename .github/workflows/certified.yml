@@ -110,9 +110,13 @@ jobs:
     needs: build
     runs-on: ubuntu-latest
     steps:
-      # Every package the build produced, each in its own directory: the `.junodrv`, its
-      # digest, and the `meta.json` describing it. Not merged, because two packages from one
-      # repo have two of each and merging them would collide on meta.json.
+      # Every package the build produced: the `.junodrv`, its digest, and the `meta.json`
+      # describing it. Not merged, because two packages from one repo have two of each and
+      # merging them would collide on meta.json.
+      #
+      # The layout is not fixed. Downloading several artifacts puts each in its own directory;
+      # downloading exactly one extracts it flat into `path`. So the steps below find the
+      # meta.json files rather than globbing for a directory name that is only there sometimes.
       - uses: actions/download-artifact@v6
         with:
           pattern: pkg-*
@@ -147,8 +151,9 @@ jobs:
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
         run: |
           set -euo pipefail
-          for dir in "$RUNNER_TEMP"/packages/pkg-*; do
-            artifact=$(jq -r .artifact "$dir/meta.json")
+          find "$RUNNER_TEMP/packages" -name meta.json | while read -r meta; do
+            dir=$(dirname "$meta")
+            artifact=$(jq -r .artifact "$meta")
             key="p/$GITHUB_REPOSITORY/$artifact"
 
             npx --yes wrangler@4 r2 object put "${{ inputs.bucket }}/$key" \
@@ -172,9 +177,20 @@ jobs:
           description=$(GH_TOKEN="$DESC_TOKEN" gh repo view "$GITHUB_REPOSITORY" \
                           --json description -q .description)
 
-          for dir in "$RUNNER_TEMP"/packages/pkg-*; do
-            artifact=$(jq -r .artifact "$dir/meta.json")
-            tag=$(jq -r .tag "$dir/meta.json")
+          # A loop over nothing succeeds and indexes nothing, which reads as a green publish
+          # that never happened. This is exactly how the first run through this pipeline
+          # failed, so it is worth one line to make the next one loud.
+          found=$(find "$RUNNER_TEMP/packages" -name meta.json | wc -l)
+          if [ "$found" -eq 0 ]; then
+            echo "::error::the build produced no meta.json — nothing to index"
+            exit 1
+          fi
+          echo "indexing $found package(s)"
+
+          find "$RUNNER_TEMP/packages" -name meta.json | while read -r meta; do
+            dir=$(dirname "$meta")
+            artifact=$(jq -r .artifact "$meta")
+            tag=$(jq -r .tag "$meta")
 
             # Where the payload actually went. Reconstructed rather than passed back from the
             # build, because that is a matrix and a matrix job's outputs keep only the last
@@ -189,14 +205,14 @@ jobs:
             junodrv entry "$dir/$artifact" \
               --repo "$GITHUB_REPOSITORY" \
               --url "$url" \
-              --sha256 "$(jq -r .sha256 "$dir/meta.json")" \
-              --version "$(jq -r .version "$dir/meta.json")" \
+              --sha256 "$(jq -r .sha256 "$meta")" \
+              --version "$(jq -r .version "$meta")" \
               --source '${{ steps.vis.outputs.source }}' \
               --description "$description" \
               > "$dir/entries.json"
 
             jq -n \
-              --arg channel "$(jq -r .channel "$dir/meta.json")" \
+              --arg channel "$(jq -r .channel "$meta")" \
               --slurpfile entries "$dir/entries.json" \
               '{event_type: "driver-published",
                 client_payload: {channel: $channel, entries: $entries[0]}}' \
