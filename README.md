@@ -93,16 +93,21 @@ treat a shipped key as something that will eventually need rotating.
 
 ## What this workflow will not do
 
-It does not touch the registry. Being listed at [driver.juno.house](https://driver.juno.house)
-as **certified** is a claim about where an artifact came from, and a workflow anyone may call
-cannot make that claim about itself.
+It does not touch the registry, so calling it does not get a driver listed at
+[driver.juno.house](https://driver.juno.house).
 
-Indexing lives in `certified.yml` in the private registry repo. It calls this one for the build
-and the release, then dispatches the index row. A reusable workflow in a private repository can
-only be called from inside its own organisation, so the provenance claim is enforced by GitHub
-rather than by everybody agreeing not to.
+Indexing is `certified.yml`, beside this one. It calls this workflow for the build and the
+release, then dispatches the index row — and that dispatch needs `REGISTRY_TOKEN`, an
+organisation secret only a repository inside `junohouse` inherits. Read that workflow, copy it,
+call it: without the token its last step gets a 401 and the index is untouched. **The token is
+what "certified" means**, not the file being hidden.
 
-That is a claim about provenance, **not a safety audit**, and it is worth being precise about
+It was hidden, in the private registry repo, until a public driver repo tried to call it. A
+public repository cannot call a reusable workflow stored in a private one, whatever access
+setting the private repo has — so the privacy was belt-and-braces over a gate that was already
+doing the work.
+
+And it is a claim about provenance, **not a safety audit**, which is worth being precise about
 because the controller UI shows it to residents.
 
 ## Third-party drivers
@@ -133,5 +138,10 @@ fragile as it sounds.
 
 ## This repo is public on purpose
 
-A reusable workflow in a private repo cannot be called from another organisation, and the point
-of this one is that it can. There are no secrets in it — the private half passes its own in.
+Two reasons, and the second one was learned the hard way. A reusable workflow in a private repo
+cannot be called from another organisation, and the point of `driver.yml` is that it can. It
+also cannot be called by a **public** repository at all, in any organisation — which is why
+`certified.yml` is here too rather than hidden in the registry.
+
+There are no secrets in either file. What separates a certified build from anyone else's is
+`REGISTRY_TOKEN`, which the caller supplies and only this organisation has.
