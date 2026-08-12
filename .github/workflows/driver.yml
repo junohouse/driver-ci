@@ -82,24 +82,28 @@ concurrency:
 
 jobs:
   # -------------------------------------------------------------------------------------
-  # One job per package per platform. A driver is a native library, so "build once" is not
-  # available to us: a controller is macOS in some houses and Linux in others, and Linux is as
-  # often ARM as x86 — a small box in a cupboard, or this project's own container on Apple
-  # silicon. A package missing a platform fails at install time on that platform, which is the
-  # worst place to find out, and the failure reads as a broken driver rather than a missing
-  # build. Architecture is in the payload's name for the same reason: an x86-64 and an aarch64
-  # `.so` are both `.so`, and handing over the wrong one fails at dlopen saying nothing useful.
+  # One job per package. Not one per platform — a driver compiles to WebAssembly, and there is
+  # only one of those.
+  #
+  # This used to be a three-way matrix: macOS on ARM, Linux on x86-64, Linux on ARM. It was not
+  # thoroughness, it was a tax. A native driver is a shared library, so it has to be built for
+  # every machine a controller might be, each one named after its architecture because an
+  # x86-64 and an aarch64 `.so` are both `.so` and handing over the wrong one fails at `dlopen`
+  # saying nothing useful. A package that missed a platform failed at install time in somebody's
+  # house, which is the worst place to find out. And the matrix could not express the real
+  # constraint anyway: a `.so` built here against this runner's glibc will not load on a
+  # controller with an older one, whatever the architecture says.
+  #
+  # `driver.wasm` has no architecture, no libc, and no symbol versioning, so none of that is a
+  # question any more. Three legs became one, the payload got smaller, and the class of bug
+  # where a house is handed a library it cannot load stopped existing.
   # -------------------------------------------------------------------------------------
   build:
     strategy:
       fail-fast: false
       matrix:
         package: ${{ fromJSON(inputs.packages) }}
-        target:
-          - { os: macos-14,         payload: driver-macos-aarch64.dylib }
-          - { os: ubuntu-latest,    payload: driver-linux-x86_64.so }
-          - { os: ubuntu-24.04-arm, payload: driver-linux-aarch64.so }
-    runs-on: ${{ matrix.target.os }}
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
 
@@ -112,41 +116,46 @@ jobs:
       # public and depends on nothing of ours, so building one needs no access to anything —
       # which is what makes a driver something an outsider can build and check for themselves.
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-wasip1
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: ${{ matrix.package }}
 
-      # Ask cargo where it put the library rather than guessing a path. A repo shipping more
+      # Ask cargo where it put the module rather than guessing a path. A repo shipping more
       # than one package shares a workspace `target/` at the repo root, so the artifact is
       # *not* under the package directory — and searching the shared directory by extension
       # would happily pick up a sibling package's driver instead of this one's.
       #
-      # The result is renamed to the flat `driver.<ext>` the package format expects. The two
-      # platforms have different extensions, so both sit in one archive without colliding and
-      # the controller picks the one it can actually load.
-      - name: Build and collect the library
+      # The result is renamed to the flat `driver.wasm` the package format expects.
+      #
+      # `wasip1` and not `unknown-unknown`: a driver links Rust's std, and on the bare target
+      # std's own startup has no way to ask for entropy or report a panic. The controller
+      # implements the five imports that come out of this by hand and grants nothing else —
+      # see `driver/wasm.rs` in core. Building against a target with no host is not a tighter
+      # sandbox, just a driver that fails to link the moment it wants a random number.
+      - name: Build and collect the module
         working-directory: ${{ matrix.package }}
         run: |
-          cargo build --release --message-format=json-render-diagnostics \
-            > "$RUNNER_TEMP/build.json"
+          cargo build --release --target wasm32-wasip1 \
+            --message-format=json-render-diagnostics > "$RUNNER_TEMP/build.json"
 
-          ext='${{ matrix.target.payload }}'; ext="${ext##*.}"
           lib=$(jq -r 'select(.reason == "compiler-artifact")
                        | select(.target.kind[]? == "cdylib")
                        | .filenames[]?' "$RUNNER_TEMP/build.json" \
-                | grep "\\.$ext$" | tail -1)
+                | grep '\.wasm$' | tail -1)
 
           if [ -z "$lib" ]; then
-            echo "::error::cargo built no .$ext for ${{ matrix.package }} — is crate-type = [\"cdylib\"] set?"
+            echo "::error::cargo built no .wasm for ${{ matrix.package }} — is crate-type = [\"cdylib\"] set?"
             exit 1
           fi
-          echo "collected $lib"
-          cp "$lib" "$RUNNER_TEMP/${{ matrix.target.payload }}"
+          echo "collected $lib ($(stat -c%s "$lib") bytes)"
+          cp "$lib" "$RUNNER_TEMP/driver.wasm"
 
       - uses: actions/upload-artifact@v5
         with:
-          name: lib-${{ env.SLUG }}-${{ matrix.target.payload }}
-          path: ${{ runner.temp }}/${{ matrix.target.payload }}
+          name: lib-${{ env.SLUG }}-driver.wasm
+          path: ${{ runner.temp }}/driver.wasm
           if-no-files-found: error
 
   # -------------------------------------------------------------------------------------
@@ -242,8 +251,8 @@ jobs:
           path: ${{ runner.temp }}/libs
           merge-multiple: true
 
-      - name: Stage the payloads beside the manifest
-        run: cp ${{ runner.temp }}/libs/driver-* '${{ matrix.package }}/'
+      - name: Stage the payload beside the manifest
+        run: cp ${{ runner.temp }}/libs/driver.wasm '${{ matrix.package }}/'
 
       # The key never goes near the build job, which is credential-free on purpose — it is
       # written into the manifest here, where the secrets already are. So rotating it is a
