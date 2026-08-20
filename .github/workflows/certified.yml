@@ -202,11 +202,15 @@ jobs:
               url="https://github.com/$GITHUB_REPOSITORY/releases/download/$tag/$artifact"
             fi
 
+            # The commit is what "which build is this" means while nothing is released: every
+            # driver here tracks `main` and cuts no tags, so the manifest version is whatever
+            # somebody last typed and two houses a month apart both read `1.0.0`.
             junodrv entry "$dir/$artifact" \
               --repo "$GITHUB_REPOSITORY" \
               --url "$url" \
               --sha256 "$(jq -r .sha256 "$meta")" \
               --version "$(jq -r .version "$meta")" \
+              --commit "$GITHUB_SHA" \
               --source '${{ steps.vis.outputs.source }}' \
               --description "$description" \
               > "$dir/entries.json"
